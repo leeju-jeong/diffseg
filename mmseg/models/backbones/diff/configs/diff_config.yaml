@@ -1,0 +1,142 @@
+# Config File for DIFF of paper 'Diffusion Features to Bridge Domain Gap for Semantic Segmentation'
+# By Yuxiang Ji
+
+
+# projection_dim: [512, 512, 320, 128]
+# projection_dim_x4: 64
+# projection_dim: [768, 768, 384, 192]
+# projection_dim_x4: 96
+projection_dim: [2048, 2048, 1024, 512]
+projection_dim_x4: 256
+
+# Change for your sdv2-1 repo
+model_id: "/home/leeju2/diffseg/output_storage/sdv2.1/"  
+# Unet finetuned path
+unet_ckpt_pth: "/home/leeju2/diffseg/output_storage/sdv2.1/unet"
+
+# As default
+aggregation_type: "direct_aggregation"
+diffusion_mode: "inversion"
+
+# Do path-controlled diffusion as conditional branch in paper
+do_mask_steps: True
+do_one_step: False
+
+# As default
+guidance_scale: 7.5
+eta: 0.0
+#input_resolution: [512, 512] # H, W
+input_resolution: [384, 384]
+prompt: ""   #기본 프롬프트
+negative_prompt: ""
+
+# As default for 37 steps
+# Subsample every 5 steps
+# You could also change it for fewer steps for accelerating
+scheduler_timesteps: [160, 139, 121, 105, 91, 80, 69, 60, 52, 45, 40, 34, 30, 26, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+save_timestep: [33, 29, 25, 22, 18, 14, 11, 7, 3]  #33
+num_timesteps: 37
+
+# scheduler_timesteps: [100]
+# save_timestep: [0]
+# num_timesteps: 1
+
+# scheduler_timesteps: [80, 60, 40, 20, 1]
+# save_timestep: [4, 3, 2, 1, 0]
+# num_timesteps: 5
+
+# As default
+s_tmin: 10
+s_tmax: 250
+mask_min: -1
+mask_max: 1000
+
+# Blocks in UNet for extraction
+# resnet for intermediate-feature, ca for cross-attentino
+idxs_resnet: [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2], [2, 0], [2, 1], [2, 2], [3, 0], [3, 1], [3, 2]]
+idxs_ca: [[1, 0], [1, 1], [1, 2], [2, 0], [2, 1], [2, 2], [3, 0], [3, 1], [3, 2]]
+# idxs_ca: []
+
+ #camvid label
+label_map:
+  0: 'Building'
+  1: 'Bicyclist'
+  2: 'Fence'
+  3: 'Pole'
+  4: 'Pedestrian'
+  5: 'Road'
+  6: 'Sky'
+  7: 'SignSymbol'
+  8: 'Tree'
+  9: 'Sidewalk'
+  10: 'Car'
+
+#camvid sentence
+#label_map:
+#  0: 'A tall structure made of concrete and glass that houses offices and apartments. '
+#  1: 'A person wearing a helmet riding a bicycle on the street.'
+#  2: 'A wooden or metal barrier that encloses a yard or property.'
+#  3: 'A vertical post used to support electrical wires or street lamps.'
+#  4: 'A person walking on the sidewalk or crossing the street.'
+#  5: 'A paved surface for vehicles to drive on, often marked with lanes.'
+#  6: 'The area above the earth, usually blue during the day with clouds.'
+#  7: 'A traffic sign or symbol used to guide or warn drivers and pedestrians.'
+#  8: 'A tall plant with a trunk, branches, and leaves providing shade.'
+#  9: 'A paved path beside the road for people to walk safely.'
+#  10: 'A motor vehicle with four wheels used for transportation.'
+
+#camvid bag of words
+#label_map:
+#  0: 'Building', 'Architecture', 'Facade', 'Structure', 'Windows'
+#  1: 'Bicyclist', 'Helmet', 'Pedals', 'Wheels', 'Cycling'
+#  2: 'Fence', 'Boundary', 'Pickets', 'Barrier', 'Perimeter'
+#  3: 'Pole', 'Slender', 'Vertical', 'Cable', 'Metallic'
+#  4: Pedestrian, Crosswalk, Footsteps, Walker, Striding
+#  5: 'Road', 'Asphalt', 'Lane', 'Driveway', 'Trafficwa'
+#  6: 'Sky', 'Atmosphere', 'Horizon', 'Clouds', 'Airspace'
+#  7: 'SignSymbol', 'Traffic sign', 'Pictogram', 'Instruction', 'Regulation'
+#  8: 'Tree', 'Foliage', 'Trunk', 'Branches', 'Canopy'
+#  9: 'Sidewalk', 'Curb', 'Walkway', 'Pedway', 'Paving'
+#  10: 'Car', 'Vehicle', 'Windshield', 'Engine', 'Parking'
+
+# KITTI label_map
+# label_map:
+#   0: 'sky'
+#   1: 'building'
+#   2: 'road'
+#   3: 'sidewalk'
+#   4: 'fence'
+#   5: 'vegetation'
+#   6: 'pole'
+#   7: 'car'
+#   8: 'sign'
+#   9: 'pedestrian'
+#   10: 'cyclist'
+
+#   # KITTI label_map with descriptions
+# label_map:
+#   0: 'A clear blue sky above the urban landscape.'
+#   1: 'A building or architectural structure in the city environment.'
+#   2: 'A paved road surface for vehicles to travel on.'
+#   3: 'A sidewalk or footpath for pedestrians alongside the road.'
+#   4: 'A fence or barrier separating different areas or properties.'
+#   5: 'Vegetation including trees, bushes, and other plant life.'
+#   6: 'A vertical pole used for signs, lights or other street fixtures.'
+#   7: 'A car or automobile on the road or parked.'
+#   8: 'A traffic sign providing information or direction to road users.'
+#   9: 'A person walking in the urban environment.'
+#   10: 'A person riding a bicycle through the city.'
+
+# # KITTI label_map with keywords
+# label_map:
+#   0: 'sky, blue, clouds, atmosphere, heaven'
+#   1: 'building, structure, architecture, facade, construction'
+#   2: 'road, street, pathway, asphalt, lane'
+#   3: 'sidewalk, pavement, footpath, walkway, pedestrian path'
+#   4: 'fence, barrier, railing, enclosure, boundary'
+#   5: 'vegetation, tree, plant, foliage, greenery'
+#   6: 'pole, post, column, vertical support, street pole'
+#   7: 'car, vehicle, automobile, transportation, motor vehicle'
+#   8: 'sign, traffic sign, signpost, signage, information'
+#   9: 'pedestrian, person, walker, human, passerby'
+#   10: 'cyclist, bicycle rider, bike rider, bicyclist, biker'
