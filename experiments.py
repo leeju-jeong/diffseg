@@ -292,3 +292,7 @@ def generate_experiment_cfgs(id):
         raise NotImplementedError('Unknown id {}'.format(id))
 
     return cfgs
+
+
+#  nohup bash experiments.sh > txtkd_lamd0.1_innerdt_fold1_.log 2>&1 &
+ 

@@ -1,7 +1,7 @@
 dataset_type = 'camvidDataset'
 #data_root = '/home/leeju2/diffseg/data/camvid/384x512_fold1/'  #384 * 512 (H * W)
-data_root = '/home/leeju2/diffseg/IMRL_Project-main/data/camvid/camvid_384x512/fold1/'
-data_root_val = '/home/leeju2/diffseg/IMRL_Project-main/data/camvid/camvid_384x288/384x288_fold_p/fold1/'
+data_root = '/home/ejeon6/leeju/diffseg/data/camvid/camvid_384x512/fold1'
+data_root_val = '/home/ejeon6/leeju/diffseg/data/camvid/camvid_384x288/384x288_fold_p/fold1'
 # 데이터 전처리 파이프라인
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], 

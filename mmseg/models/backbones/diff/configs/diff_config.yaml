@@ -10,9 +10,9 @@ projection_dim: [2048, 2048, 1024, 512]
 projection_dim_x4: 256
 
 # Change for your sdv2-1 repo
-model_id: "/home/leeju2/diffseg/output_storage/sdv2.1/"  
+model_id: "/home/ejeon6/leeju/diffseg/work_dirs/stable-diffusion-2-1-base"  
 # Unet finetuned path
-unet_ckpt_pth: "/home/leeju2/diffseg/output_storage/sdv2.1/unet"
+unet_ckpt_pth: "/home/ejeon6/leeju/diffseg/work_dirs/stable-diffusion-2-1-base/unet"
 
 # As default
 aggregation_type: "direct_aggregation"

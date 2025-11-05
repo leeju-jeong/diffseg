@@ -3,6 +3,7 @@
 # Licensed under the Apache License, Version 2.0
 # ---------------------------------------------------------------
 
+## teacher head
 import torch
 import torch.nn as nn
 from mmcv.cnn import ConvModule, DepthwiseSeparableConvModule
@@ -159,33 +160,38 @@ class DAFormerHead(BaseDecodeHead):
         self.fuse_layer = build_layer(    #융합 레이어
             sum(embed_dims), self.channels, **fusion_cfg)
         
-    def forward(self, inputs, return_features=False):
+    def forward(self, inputs, return_features=True,return_fuse=False):  # 파라미터 추가
         x = inputs
         n, _, h, w = x[-1].shape
-        # for f in x:
-        #     mmcv.print_log(f'{f.shape}', 'mmseg')
 
         os_size = x[0].size()[2:]
         _c = {}
         for i in self.in_index:
-            # mmcv.print_log(f'{i}: {x[i].shape}', 'mmseg')
             _c[i] = self.embed_layers[str(i)](x[i])
             if _c[i].dim() == 3:
                 _c[i] = _c[i].permute(0, 2, 1).contiguous()\
                     .reshape(n, -1, x[i].shape[2], x[i].shape[3])
-            # mmcv.print_log(f'_c{i}: {_c[i].shape}', 'mmseg')
             if _c[i].size()[2:] != os_size:
-                # mmcv.print_log(f'resize {i}', 'mmseg')
                 _c[i] = resize(
                     _c[i],
                     size=os_size,
                     mode='bilinear',
                     align_corners=self.align_corners)
 
-        x = self.fuse_layer(torch.cat(list(_c.values()), dim=1))
-        #features = x
-        x = self.cls_seg(x)
-        features = x
+        fused_feat = self.fuse_layer(torch.cat(list(_c.values()), dim=1))
+        
+    
+        
+        # ✅ Feature만 반환 (Teacher용)
+        if return_fuse:
+            return fused_feat
+        
+        # Logit 계산
+        x = self.cls_seg(fused_feat)
+        
+        # ✅ Logit + Feature 반환 (Gram KD용)
         if return_features:
-            return x, features
+            return x, fused_feat
+        
+        # ✅ Logit만 반환 (기본)
         return x

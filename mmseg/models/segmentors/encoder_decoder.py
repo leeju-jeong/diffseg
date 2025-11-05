@@ -419,7 +419,7 @@ class EncoderDecoder(BaseSegmentor):
                                                         seg_weight,
                                                         return_logits=True,
                                                         prefix='decode_w_seg')
-            loss_decode_wo_seg = self._ _forward_train(x_wo_seg, img_metas,
+            loss_decode_wo_seg = self._decode_head_forward_train(x_wo_seg, img_metas,
                                                         gt_semantic_seg,
                                                         seg_weight,
                                                         return_logits=True,
@@ -464,7 +464,18 @@ class EncoderDecoder(BaseSegmentor):
                     prefix='decode'
                 )
                 student_logits = loss_decode_seg['decode.logits']
-
+            elif self.kd_type == 'textkd':
+                # Student: feature와 logit 둘 다 받기
+                student_logits, student_features = self.decode_head.forward(
+                    x, 
+                    kd_mode='textkd'
+                )
+                loss_decode_seg = self._decode_head_forward_train(
+                    x, img_metas, student_gt,
+                    seg_weight=None,
+                    return_logits=False,
+                    prefix='decode'
+    )
             else:
                 loss_decode_seg = self._decode_head_forward_train(
                     x, img_metas, student_gt,
@@ -499,9 +510,9 @@ class EncoderDecoder(BaseSegmentor):
                     teacher_logits = teacher_output
 
                 elif self.kd_type == 'textkd':
-                    # Teacher decode head에서 직접 logits 받아오기 (96×96 크기)
+                    # Teacher decode head에서 featrue 받아오기 (256x96×96 크기)
                     teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
-                    teacher_logits = self.teacher.decode_head.forward(teacher_x)
+                    teacher_features = self.teacher.decode_head.forward(teacher_x, return_features=False, return_fuse=True,) #feature만 반환
 
                 else:
                     teacher_logits = self.teacher.encode_decode(teacher_img, img_metas, gt_semantic_seg=None)
@@ -582,44 +593,54 @@ class EncoderDecoder(BaseSegmentor):
                 kd_loss = {'kd_loss': pr_loss * self.kd_lamb}
             
             elif self.kd_type == 'textkd':
-                if student_logits.shape != teacher_logits.shape:
-                    student_logits_up = F.interpolate(
-                        student_logits, 
-                        size=teacher_logits.shape[-2:], 
+                if student_features.shape != teacher_features.shape:
+                    student_features_up = F.interpolate(
+                        student_features, 
+                        size=teacher_features.shape[-2:], 
                         mode='bilinear', 
                         align_corners=self.align_corners
-                    ) # student logits를 teacher logits 크기(96×96)로 upsampling
+                    ) # student_features_up를 teacher_features 크기(96×96)로 upsampling
                 else:
-                    student_logits_up = student_logits
+                    student_features_up = student_features
                     
-                # 디버그: logit shape 확인
-                # print(f"[TextKD Debug] student_logits shape: {student_logits.shape}")
-                # print(f"[TextKD Debug] student_logits_up shape: {student_logits_up.shape}")
-                # print(f"[TextKD Debug] teacher_logits shape: {teacher_logits.shape}")
+                
                 
                 # Mask 준비
                 if teacher_gt is not None:
                     mask = (teacher_gt != 255)
-                    # mask를 teacher_logits 크기에 맞춰 resize
+                    # mask를 teacher_features 크기에 맞춰 resize
                     if mask.dim() == 3:
                         mask = mask.unsqueeze(1)  # (B, 1, H, W)
-                    if mask.shape[2:] != teacher_logits.shape[2:]:
+                    if mask.shape[2:] != teacher_features.shape[2:]:
                         mask = F.interpolate(
                             mask.float(),
-                            size=teacher_logits.shape[2:],
+                            size=teacher_features.shape[2:],
                             mode='nearest'
                         ).bool()
                 else:
                     mask = None
-                
+
+                ### 디버깅 ###
+                if self.iter % 3000 == 0:
+                    print("\n" + "="*80)
+                    print("[TextKD Debug] Before KD Loss")
+                    print("="*80)
+                    print(f"student_features_up shape: {student_features_up.shape}")
+                    print(f"teacher_features shape: {teacher_features.shape}")
+                    print(f"Shapes match: {student_features_up.shape == teacher_features.shape}")
+                    if mask is not None:
+                        print(f"mask shape: {mask.shape}")
+                        print(f"Valid pixels: {mask.sum().item()} / {mask.numel()}")
+                    print("="*80 + "\n")
+
                 # Text-Guided KD
                 kd_loss = self.text_kd(
-                    student_logits=student_logits_up,
-                    teacher_logits=teacher_logits,
+                    student_features=student_features_up,
+                    teacher_features=teacher_features,
                     mask=mask
                 )
                 
-
+                
 
             else:
                 raise ValueError(f"Unknown KD type: {self.kd_type}")

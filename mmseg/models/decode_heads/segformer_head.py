@@ -98,22 +98,21 @@ class SegFormerHead(BaseDecodeHead):
                     mode='bilinear',
                     align_corners=False)
 
-        _c = self.linear_fuse(torch.cat(list(_c.values()), dim=1))
+        fused_feat = self.linear_fuse(torch.cat(list(_c.values()), dim=1))
         
-        #features = _c
-        #if return_features and hasattr(self, 'kd_projection'):
-        #    features = self.kd_projection(features)
-
+        # Dropout + Classification
         if self.dropout is not None:
-            x = self.dropout(_c)
+            x = self.dropout(fused_feat)
         else:
-            x = _c
-        x = self.linear_pred(x)   
+            x = fused_feat
+        x = self.linear_pred(x)
         
-        if kd_mode == 'gram':
+        # KD mode
+        if kd_mode == 'textkd':
+            return x, fused_feat  # ✅
+        
+        elif kd_mode == 'gram':
             features = self.kd_projection(x)
-            return x, features  
+            return x, features
+        
         return x
-
-        # if kd_mode == 'text':
-            

@@ -1,4 +1,4 @@
-name: seg
+name: diffseg
 channels:
   - defaults
   - https://repo.anaconda.com/pkgs/main
@@ -41,7 +41,6 @@ dependencies:
       - charset-normalizer==3.4.4
       - cityscapesscripts==2.2.0
       - click==8.1.8
-      - clip==1.0
       - cloudpickle==3.1.1
       - cmake==4.1.2
       - colorama==0.4.6
@@ -121,8 +120,6 @@ dependencies:
       - timm==1.0.21
       - tokenizers==0.13.3
       - tomli==2.3.0
-      - torch==2.0.1+cu118
-      - torchvision==0.15.2+cu118
       - tqdm==4.65.2
       - transformers==4.26.1
       - triton==2.0.0
@@ -134,4 +131,6 @@ dependencies:
       - yacs==0.1.8
       - yapf==0.31.0
       - zipp==3.20.2
-prefix: /home/leeju2/.conda/envs/seg
+
+# pip install git+https://github.com/openai/CLIP.git
+# pip install -e .
