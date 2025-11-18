@@ -167,7 +167,10 @@ class TextGuidedKDLoss(nn.Module):
             teacher_similarity = teacher_similarity[mask]
         
         # MSE Loss
-        loss = F.mse_loss(student_similarity, teacher_similarity)
+        # loss = F.mse_loss(student_similarity, teacher_similarity)
+        
+        # L1 Loss
+        loss =  F.l1_loss(student_similarity, teacher_similarity)
         
         # Weighting & Clipping
         loss = loss * self.lamb

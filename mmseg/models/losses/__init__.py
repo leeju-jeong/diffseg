@@ -3,9 +3,10 @@ from .cross_entropy_loss import (CrossEntropyLoss, binary_cross_entropy,
                                  cross_entropy, mask_cross_entropy)
 from .kd_loss import GramMatrixLoss
 from .utils import reduce_loss, weight_reduce_loss, weighted_loss
+from .crossatt_kd import CrossAttentionKD
 
 __all__ = [
     'accuracy', 'Accuracy', 'cross_entropy', 'binary_cross_entropy',
     'mask_cross_entropy', 'CrossEntropyLoss', 'reduce_loss',
-    'weight_reduce_loss', 'weighted_loss', 'GramMatrixLoss'
+    'weight_reduce_loss', 'weighted_loss', 'GramMatrixLoss','CrossAttentionKD'
 ]

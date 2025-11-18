@@ -27,11 +27,9 @@
 
 # #bash experiments.sh
 # # pkill -f "python tools/train.py"
-# # nohup bash experiments.sh > lamda_0.5_fold1.log 2>&1 &
+# # nohup bash experiments.sh > crossattkd_lamda_0.001_fold1.log 2>&1 &
 
-experiments=(
-    "configs/KD/camvid_DIFF2Seg_512t384s_textkd_fold1_0.5.py"
-)
+experiments=("/home/ejeon6/leeju/diffseg/configs/KD/camvid_DIFF2Seg_512t384s_crossatt_kd_fold1_0.001.py")
 
 echo "Starting experiments..."
 echo "Total experiments: ${#experiments[@]}"

@@ -1,7 +1,7 @@
 import os
 import sys
 
-project_root = "/home/leeju2/diffseg/IMRL_Project-main"
+project_root = "/home/ejeon6/leeju/diffseg"
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -13,7 +13,8 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 
-#PYTHONPATH=$(pwd):$PYTHONPATH python /home/yeonwoo3/DIFF/tools/camvid_test_2fold.py
+
+# PYTHONPATH=$(pwd):$PYTHONPATH python tools/camvid_test_2fold.py
 
 
 import argparse
@@ -33,21 +34,21 @@ fold_configs = [
         'name': 'fold1_model_on_fold2_data',
         'train_fold': 'fold1',
         'test_fold': 'fold2',
-        'config_file': '/home/leeju2/diffseg/IMRL_Project-main/configs/KD/camvid_DIFF2Seg_512t384s_textkd_innerdot.py',
-        'checkpoint_file': '/home/leeju2/diffseg/IMRL_Project-main/work_dirs/kd/textkd_1.0_Multi_LabelTeacher_pre_student/fold1/best_mIoU_iter_25000.pth',
-        'base_img_dir': '/home/leeju2/diffseg/IMRL_Project-main/data/camvid/camvid_384x288/384x288_fold_p/fold2/images',
-        'base_gt_dir': '/home/leeju2/diffseg/IMRL_Project-main/data/camvid/camvid_384x288/384x288_fold_p/fold2/ann',
-        'save_dir': '/home/leeju2/diffseg/IMRL_Project-main/work_dirs/kd/textkd_0.1_inner_imgonly_pre_student/fold1/test'  #segmentation map
+        'config_file': '/home/ejeon6/leeju/diffseg/work_dirs/kd/textkd_2opt_0.01_imgonly_pre_student/fold1/camvid_DIFF2Seg_512t384s_textkd_2opt_fold1_0.01.py',
+        'checkpoint_file': '/home/ejeon6/leeju/diffseg/work_dirs/kd/textkd_2opt_0.01_imgonly_pre_student/fold1/best_mIoU_iter_15000.pth',
+        'base_img_dir': '/home/ejeon6/leeju/diffseg/data/camvid/camvid_384x288/384x288_fold_p/fold2/images', #fold 2
+        'base_gt_dir': '/home/ejeon6/leeju/diffseg/data/camvid/camvid_384x288/384x288_fold_p/fold2/ann', # fold 2
+        'save_dir': '/home/ejeon6/leeju/diffseg/work_dirs/kd/textkd_2opt_0.01_imgonly_pre_student/fold1/test'  #segmentation map
     },
     {
         'name': 'fold2_model_on_fold1_data',
         'train_fold': 'fold2',
         'test_fold': 'fold1',
-        'config_file': '/home/leeju2/diffseg/IMRL_Project-main/configs/KD/camvid_DIFF2Seg_512t384s_textkd_fold1.py',
-        'checkpoint_file': '/home/leeju2/diffseg/IMRL_Project-main/work_dirs/kd/textkd_1.0_Multi_LabelTeacher_pre_student/fold1/best_mIoU_iter_25000.pth',
-        'base_img_dir': '/home/leeju2/diffseg/IMRL_Project-main/data/camvid/camvid_384x288/384x288_fold_p/fold1/images',
-        'base_gt_dir': '/home/leeju2/diffseg/IMRL_Project-main/data/camvid/camvid_384x288/384x288_fold_p/fold1/ann',
-        'save_dir': '/home/leeju2/diffseg/IMRL_Project-main/work_dirs/kd/textkd_1_imgonly_pre_student/fold2/test'
+        'config_file': '/home/ejeon6/leeju/diffseg/work_dirs/kd/textkd_L1_0.1_imgonly_pre_student/fold2/camvid_DIFF2Seg_512t384s_textkd_L1_fold2_0.1.py',
+        'checkpoint_file': '/home/ejeon6/leeju/diffseg/work_dirs/kd/textkd_L1_0.1_imgonly_pre_student/fold2/best_mIoU_iter_14000.pth',
+        'base_img_dir': '/home/ejeon6/leeju/diffseg/data/camvid/camvid_384x288/384x288_fold_p/fold1/images',
+        'base_gt_dir': '/home/ejeon6/leeju/diffseg/data/camvid/camvid_384x288/384x288_fold_p/fold1/ann',
+        'save_dir': '/home/ejeon6/leeju/diffseg/work_dirs/kd/textkd_L1_0.1_imgonly_pre_student/fold2/test'
     }
 ]
 

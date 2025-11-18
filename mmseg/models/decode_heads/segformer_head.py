@@ -7,6 +7,8 @@
 # ---------------------------------------------------------------
 # A copy of the license is available at resources/license_segformer
 
+# student head
+
 import torch
 import torch.nn as nn
 from mmcv.cnn import ConvModule
@@ -108,9 +110,10 @@ class SegFormerHead(BaseDecodeHead):
         x = self.linear_pred(x)
         
         # KD mode
-        if kd_mode == 'textkd':
-            return x, fused_feat  # ✅
+        if kd_mode == 'textkd' or kd_mode == "crossatt_kd": 
+            return x, fused_feat  # ✅ x 는 (B, num_classes, H, W), fused_feat는 (B, embed_dim, H, W) , x는 logit
         
+
         elif kd_mode == 'gram':
             features = self.kd_projection(x)
             return x, features

@@ -45,6 +45,8 @@ class EncoderDecoder(BaseSegmentor):
                  teacher_config=None,
                  kd_temperature=4.0,
                  kd_lamb=0.1,
+                 kd_lamb_i2t=None,
+                 kd_lamb_t2i=None,
                  kd_max_v=1.0,
                  at_p=2,
                  task_weight=1.0,
@@ -81,7 +83,7 @@ class EncoderDecoder(BaseSegmentor):
         assert self.with_decode_head
 
         #KD 관련
-        self.kd_type = kd_type  # 'kl', 'mse', 'gram', 'at', 'textkd'
+        self.kd_type = kd_type  # 'kl', 'mse', 'gram', 'at', 'textkd' , 'crossatt_kd'
         self.use_kd = use_kd
         self.teacher_config = teacher_config
         if self.use_kd and teacher_config is not None:
@@ -128,11 +130,37 @@ class EncoderDecoder(BaseSegmentor):
                 max_value=self.kd_max_v,
                 device='cuda',
                 freeze_teacher_projection=False,
+                normalize_embeddings = True,  #  새로운 파라미터 (임베딩 정규화)
+                normalize_similarity = True,  #  기존 (유사도 맵 정규화)
                 use_clip_text=True,
+                # att_map= True, # attentive map 사용
                 debug=True,
                 print_interval=int(os.environ.get('TEXT_KD_PRINT_INT', '1'))
             )
 
+        if self.kd_type == 'crossatt_kd':
+            from mmseg.models.losses.crossatt_kd import CrossAttentionKD
+            lamb_i2t_val = kd_lamb_i2t if kd_lamb_i2t is not None else self.kd_lamb * 0.5
+            lamb_t2i_val = kd_lamb_t2i if kd_lamb_t2i is not None else self.kd_lamb * 0.5
+            
+            self.cross_attn_kd = CrossAttentionKD(
+                num_classes=getattr(self.decode_head, 'num_classes', 11),
+                class_names=None,
+                feature_dim=256,  # DAFormerHead의 fused feature dim
+                text_dim=512,     # CLIP text embedding dim
+                num_heads=int(os.environ.get('CROSS_ATT_NUM_HEADS', '1')),
+                lamb_i2t=lamb_i2t_val,
+                lamb_t2i=lamb_t2i_val,
+                clip_model_name=os.environ.get('TEXT_KD_CLIP', 'ViT-B/32'),
+                use_clip_text=True,
+                device='cuda'
+            )
+            
+            print(f"[EncoderDecoder] CrossAttentionKD initialized")
+            print(f"  - Lambda I2T: {lamb_i2t_val}")
+            print(f"  - Lambda T2I: {lamb_t2i_val}")
+                
+        
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         """Override state_dict to save only student weights during KD training"""
         state_dict = super().state_dict(destination, prefix=prefix, keep_vars=keep_vars)
@@ -464,18 +492,26 @@ class EncoderDecoder(BaseSegmentor):
                     prefix='decode'
                 )
                 student_logits = loss_decode_seg['decode.logits']
+
             elif self.kd_type == 'textkd':
-                # Student: feature와 logit 둘 다 받기
-                student_logits, student_features = self.decode_head.forward(
-                    x, 
-                    kd_mode='textkd'
-                )
+                student_logits, student_features = self.decode_head.forward(x, kd_mode='textkd')
+                loss_decode_seg = self._decode_head_forward_train(
+                    x, img_metas, student_gt,
+                    seg_weight=None,
+                    return_logits=False,
+                    prefix='decode')
+                
+            
+            elif self.kd_type == 'crossatt_kd':
+                # Student: feature만 받기 (cross attention 용)
+                student_logits, student_features = self.decode_head.forward(x, kd_mode='crossatt_kd')
                 loss_decode_seg = self._decode_head_forward_train(
                     x, img_metas, student_gt,
                     seg_weight=None,
                     return_logits=False,
                     prefix='decode'
-    )
+                )
+    
             else:
                 loss_decode_seg = self._decode_head_forward_train(
                     x, img_metas, student_gt,
@@ -486,37 +522,48 @@ class EncoderDecoder(BaseSegmentor):
                 student_logits = loss_decode_seg['decode.logits']
             
             # Teacher forward pass
-            with torch.no_grad():
+            if self.kd_type in ['textkd', 'crossatt_kd']:
+                # TextKD와 CrossAttentionKD: projection layer 학습을 위해 gradient 흐름 허용
+                # Teacher backbone/decode head는 여전히 frozen (requires_grad=False)
                 self.teacher.eval()
-                for param in self.teacher.parameters():
-                    param.requires_grad = False
-                for module in self.teacher.modules():
-                    module.eval()
-                    for param in module.parameters():
+                
+                teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
+                teacher_features = self.teacher.decode_head.forward(
+                    teacher_x, 
+                    return_features=False, 
+                    return_fuse=True
+                )
+                # teacher_features에 gradient 정보 있음
+                # → text_kd.teacher_projection 또는 cross_attn_kd.teacher_*_q/k/v 학습 가능
+
+            else:
+                # 다른 KD type: 기존처럼 완전히 no_grad
+                with torch.no_grad():
+                    self.teacher.eval()
+                    for param in self.teacher.parameters():
                         param.requires_grad = False
-                if hasattr(self.teacher.backbone, 'diff_model'):
-                    self.teacher.backbone.diff_model.eval()
-                    for module in self.teacher.backbone.diff_model.modules():
+                    for module in self.teacher.modules():
                         module.eval()
                         for param in module.parameters():
                             param.requires_grad = False
-                
-                if self.kd_type == 'gram':
-                    #Teacher feature 추출
-                    teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
-                    teacher_output, teacher_features = self.teacher.decode_head.forward(
-                        teacher_x, return_features=True
-                    )
-                    teacher_logits = teacher_output
-
-                elif self.kd_type == 'textkd':
-                    # Teacher decode head에서 featrue 받아오기 (256x96×96 크기)
-                    teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
-                    teacher_features = self.teacher.decode_head.forward(teacher_x, return_features=False, return_fuse=True,) #feature만 반환
-
-                else:
-                    teacher_logits = self.teacher.encode_decode(teacher_img, img_metas, gt_semantic_seg=None)
+                    if hasattr(self.teacher.backbone, 'diff_model'):
+                        self.teacher.backbone.diff_model.eval()
+                        for module in self.teacher.backbone.diff_model.modules():
+                            module.eval()
+                            for param in module.parameters():
+                                param.requires_grad = False
                     
+                    if self.kd_type == 'gram':
+                        teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
+                        teacher_output, teacher_features = self.teacher.decode_head.forward(
+                            teacher_x, return_features=True
+                        )
+                        teacher_logits = teacher_output
+                    else:
+                        teacher_logits = self.teacher.encode_decode(teacher_img, img_metas, gt_semantic_seg=None)
+                    
+
+
             # KD loss 계산 (type에 따라 분기)
             if teacher_gt is not None:
                 mask = (teacher_gt != 255)
@@ -603,7 +650,7 @@ class EncoderDecoder(BaseSegmentor):
                 else:
                     student_features_up = student_features
                     
-                
+            
                 
                 # Mask 준비
                 if teacher_gt is not None:
@@ -639,17 +686,47 @@ class EncoderDecoder(BaseSegmentor):
                     teacher_features=teacher_features,
                     mask=mask
                 )
-                
-                
 
+            ####cross attention kd####
+            elif self.kd_type == 'crossatt_kd':
+                # Feature 크기 맞추기
+                if student_features.shape != teacher_features.shape:
+                    student_features_up = F.interpolate(
+                        student_features, 
+                        size=teacher_features.shape[-2:], 
+                        mode='bilinear', 
+                        align_corners=self.align_corners
+                    )
+                else:
+                    student_features_up = student_features
+                
+                # Cross Attention KD Loss
+                kd_loss = self.cross_attn_kd(
+                    student_features=student_features_up,
+                    teacher_features=teacher_features
+                )
+                
+                # 디버그 출력
+                if self.iter % 500 == 0:
+                    print(f"\n[Iter {self.iter}] Cross Attention KD:")
+                    print(f"  Student features: {student_features_up.shape}")
+                    print(f"  Teacher features: {teacher_features.shape}")
+                    print(f"  I2T Loss: {kd_loss['i2t_loss'].item():.4f}")
+                    print(f"  T2I Loss: {kd_loss['t2i_loss'].item():.4f}")
+                    print(f"  Total KD Loss: {kd_loss['kd_loss'].item():.4f}")
+            
             else:
                 raise ValueError(f"Unknown KD type: {self.kd_type}")
             
-            # Loss combination
+            # ===== Loss combination =====
             for k, v in loss_decode_seg.items():
                 loss_decode_seg[k] = v * self.task_weight
+            
             losses.update(kd_loss)
             losses.update(loss_decode_seg)
+                
+
+           
 
         else:
             x = self.extract_feat(img)

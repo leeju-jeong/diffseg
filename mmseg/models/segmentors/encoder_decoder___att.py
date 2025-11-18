@@ -1,0 +1,993 @@
+# Obtained from: https://github.com/open-mmlab/mmsegmentation/tree/v0.16.0
+# Modifications:
+# - Support for seg_weight and forward_with_aux
+# - Add forward_style
+
+# Implementation for IPKL for paper 'Diffusion Features to Bridge Domain Gap for Semantic Segmentation'
+# By Yuxiang Ji
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import os
+
+from mmseg.core import add_prefix
+from mmseg.ops import resize
+from .. import builder
+from ..builder import SEGMENTORS
+from .base import BaseSegmentor
+
+import numpy as np
+from PIL import Image
+
+from mmseg.models.decode_heads.daformer_head import DAFormerHead
+
+
+@SEGMENTORS.register_module()
+class EncoderDecoder(BaseSegmentor):
+    """Encoder Decoder segmentors.
+
+    EncoderDecoder typically consists of backbone, decode_head, auxiliary_head.
+    Note that auxiliary_head is only used for deep supervision during training,
+    which could be dumped during inference.
+    """
+
+    def __init__(self,
+                 backbone,
+                 decode_head,
+                 neck=None,
+                 auxiliary_head=None,
+                 train_cfg=None,
+                 test_cfg=None,
+                 pretrained=None,
+                 init_cfg=None,
+                 diff_train=True,
+                 teacher_config=None,
+                 kd_temperature=4.0,
+                 kd_lamb=0.1,
+                 kd_max_v=1.0,
+                 at_p=2,
+                 task_weight=1.0,
+                 use_kd=False,
+                 freeze_teacher=False,
+                 kd_type='mse'):
+        super(EncoderDecoder, self).__init__(init_cfg)
+        if pretrained is not None:
+            assert backbone.get('pretrained') is None, \
+                'both backbone and segmentor set pretrained weight'
+            backbone['pretrained'] = pretrained
+            #backbone.pretrained = pretrained
+        self.backbone = builder.build_backbone(backbone)
+
+        if hasattr(self.backbone, 'init_weights'):
+            self.backbone.init_weights()
+
+        self.diff_train = diff_train
+        self.iter = 0
+        self.total_iter = 40000
+
+        if self.backbone.__class__.__name__ == 'DIFF':
+            self.backbone_name = 'DIFF'
+        else:
+            self.backbone_name = 'others'
+        if neck is not None:
+            self.neck = builder.build_neck(neck)
+        self._init_decode_head(decode_head)
+        self._init_auxiliary_head(auxiliary_head)
+
+        self.train_cfg = train_cfg
+        self.test_cfg = test_cfg
+
+        assert self.with_decode_head
+
+        #KD 관련
+        self.kd_type = kd_type  # 'kl', 'mse', 'gram', 'at', 'textkd'
+        self.use_kd = use_kd
+        self.teacher_config = teacher_config
+        if self.use_kd and teacher_config is not None:
+            self.teacher = builder.build_segmentor(teacher_config)
+            self.kd_temperature = kd_temperature
+            self.kd_lamb = kd_lamb
+            self.kd_max_v = kd_max_v
+            self.task_weight = task_weight
+            
+            for param in self.teacher.parameters():
+                param.requires_grad = False
+            
+            # Teacher 모델과 모든 서브모듈을 강제로 eval 모드로 설정
+            self.teacher.eval()
+            for module in self.teacher.modules():
+                module.eval()
+            
+            # DIFF 모델도 강제로 eval 모드로 설정
+            if hasattr(self.teacher.backbone, 'diff_model'):
+                self.teacher.backbone.diff_model.eval()
+                for module in self.teacher.backbone.diff_model.modules():
+                    module.eval()
+            
+            self.teacher.to('cuda')
+        if self.kd_type == 'at':
+            from mmseg.models.losses.kd_loss import AT
+            self.at_p = at_p 
+            self.at_loss = AT(loss_weight=1.0, p=self.at_p)
+        if self.kd_type == 'sp':
+            from mmseg.models.losses.kd_loss import SP
+            self.sp_loss = SP()
+        if self.kd_type == 'pr':
+            from mmseg.models.losses.kd_loss import PRloss
+            self.pr_loss = PRloss()
+
+        if self.kd_type == 'textkd':
+            from mmseg.models.losses.text_kd import TextKD
+            # 하드코딩 제거: class_names=None 전달 → TextKD가 ENV(TEXT_KD_FILE/TEXT_KD_TEXTS)로 로드
+            self.text_kd = TextKD(
+                num_classes=getattr(self.decode_head, 'num_classes', 11),
+                class_names=None,
+                clip_model_name=os.environ.get('TEXT_KD_CLIP', 'ViT-B/32'),
+                lamb=self.kd_lamb,
+                max_value=self.kd_max_v,
+                device='cuda',
+                freeze_teacher_projection=False,
+                normalize_embeddings = True,  #  새로운 파라미터 (임베딩 정규화)
+                normalize_similarity = True,  #  기존 (유사도 맵 정규화)
+                use_clip_text=True,
+                # att_map= True, # attentive map 사용
+                debug=True,
+                print_interval=int(os.environ.get('TEXT_KD_PRINT_INT', '1'))
+            )
+        
+        if self.kd_type == 'att_textkd':
+            from mmseg.models.losses.text_kd import TextKD
+            # 하드코딩 제거: class_names=None 전달 → TextKD가 ENV(TEXT_KD_FILE/TEXT_KD_TEXTS)로 로드
+            self.text_kd = TextKD(
+                num_classes=getattr(self.decode_head, 'num_classes', 11),
+                class_names=None,
+                clip_model_name=os.environ.get('TEXT_KD_CLIP', 'ViT-B/32'),
+                lamb=self.kd_lamb,
+                max_value=self.kd_max_v,
+                device='cuda',
+                freeze_teacher_projection=False,
+                normalize_embeddings = True,  #  새로운 파라미터 (임베딩 정규화)
+                normalize_similarity = True,  #  기존 (유사도 맵 정규화)
+                use_clip_text=True,
+                debug=True,
+                print_interval=int(os.environ.get('TEXT_KD_PRINT_INT', '1'))
+            )
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """Override state_dict to save only student weights during KD training"""
+        state_dict = super().state_dict(destination, prefix=prefix, keep_vars=keep_vars)
+        
+        if self.use_kd and hasattr(self, 'teacher'):
+            student_state_dict = {k: v for k, v in state_dict.items() 
+                                  if not k.startswith('teacher')}
+            removed_count = len(state_dict) - len(student_state_dict)
+            if removed_count > 0:
+                print(f"[KD] Saving only student checkpoint")
+            return student_state_dict
+        return state_dict
+
+            
+    def _init_decode_head(self, decode_head):
+        """Initialize ``decode_head``"""
+        self.decode_head = builder.build_head(decode_head)
+        self.align_corners = self.decode_head.align_corners
+        self.num_classes = self.decode_head.num_classes
+
+    def _init_auxiliary_head(self, auxiliary_head):
+        """Initialize ``auxiliary_head``"""
+        if auxiliary_head is not None:
+            if isinstance(auxiliary_head, list):
+                self.auxiliary_head = nn.ModuleList()
+                for head_cfg in auxiliary_head:
+                    self.auxiliary_head.append(builder.build_head(head_cfg))
+            else:
+                self.auxiliary_head = builder.build_head(auxiliary_head)
+
+    def extract_feat(self, img, gt_semantic_seg=None, file_name=None):
+        """Extract features from images."""
+        if self.backbone_name == 'DIFF':
+            # import cv2
+            # # file_name = file_name.replace('_leftImg8bit.png', '_gtFine_labelTrainIds.png').replace('img', 'gt')
+            # file_name = file_name.replace('.png', '_labelTrainIds.png').replace('img', 'gt')
+            # input_label = cv2.imread(file_name, cv2.IMREAD_GRAYSCALE)
+            # input_label = cv2.resize(input_label, (512, 512), interpolation=cv2.INTER_NEAREST)
+            # gt_semantic_seg = torch.Tensor(input_label)[None, ...].cuda()
+            # print('jyxjyxjyx gt', gt_semantic_seg.shape)
+            x = self.backbone(img, gt_semantic_seg)
+        else:
+            x = self.backbone(img)
+        if self.with_neck:
+            x = self.neck(x)
+        return x
+
+    def generate_pseudo_label(self, img, img_metas):
+        return self.encode_decode(img, img_metas)
+
+    def encode_decode(self, img, img_metas, upscale_pred=True, gt_semantic_seg=None):
+        """Encode images with backbone and decode into a semantic segmentation
+        map of the same size as input."""
+        if img_metas and len(img_metas) > 0 and 'filename' in img_metas[0]:
+            file_name = img_metas[0]['filename']
+        else:
+            file_name = None
+        x = self.extract_feat(img, gt_semantic_seg, file_name=file_name)
+        # x = self.extract_feat(img, gt_semantic_seg)
+        out = self._decode_head_forward_test(x, img_metas)
+        if upscale_pred:
+            out = resize(
+                input=out,
+                size=img.shape[2:],
+                mode='bilinear',
+                align_corners=self.align_corners)
+        return out
+
+    def forward_with_aux(self, img, img_metas):
+        ret = {}
+
+        x = self.extract_feat(img)
+        out = self.decode_head.forward_test(x, img_metas, self.test_cfg)
+        out = resize(
+            input=out,
+            size=img.shape[2:],
+            mode='bilinear',
+            align_corners=self.align_corners)
+        ret['main'] = out
+
+        if self.with_auxiliary_head:
+            assert not isinstance(self.auxiliary_head, nn.ModuleList)
+            out_aux = self.auxiliary_head.forward_test(x, img_metas,
+                                                       self.test_cfg)
+            out_aux = resize(
+                input=out_aux,
+                size=img.shape[2:],
+                mode='bilinear',
+                align_corners=self.align_corners)
+            ret['aux'] = out_aux
+
+        return ret
+
+    def _decode_head_forward_train(self,
+                                   x,
+                                   img_metas,
+                                   gt_semantic_seg,
+                                   seg_weight=None,
+                                   return_logits=False,
+                                   prefix='decode'):
+        """Run forward function and calculate loss for decode head in
+        training."""
+        losses = dict()
+        loss_decode = self.decode_head.forward_train(x, img_metas,
+                                                    gt_semantic_seg,
+                                                    self.train_cfg,
+                                                    seg_weight, return_logits)
+
+        losses.update(add_prefix(loss_decode, prefix))
+        return losses
+
+    def _decode_head_forward_test(self, x, img_metas):
+        """Run forward function and calculate loss for decode head in
+        inference."""
+        seg_logits = self.decode_head.forward_test(x, img_metas, self.test_cfg)
+        return seg_logits
+
+    def _auxiliary_head_forward_train(self,
+                                      x,
+                                      img_metas,
+                                      gt_semantic_seg,
+                                      seg_weight=None):
+        """Run forward function and calculate loss for auxiliary head in
+        training."""
+        losses = dict()
+        if isinstance(self.auxiliary_head, nn.ModuleList):
+            for idx, aux_head in enumerate(self.auxiliary_head):
+                loss_aux = aux_head.forward_train(x, img_metas,
+                                                  gt_semantic_seg,
+                                                  self.train_cfg, seg_weight)
+                losses.update(add_prefix(loss_aux, f'aux_{idx}'))
+        else:
+            loss_aux = self.auxiliary_head.forward_train(
+                x, img_metas, gt_semantic_seg, self.train_cfg)
+            losses.update(add_prefix(loss_aux, 'aux'))
+
+        return losses
+
+    def mask_random_pixels(self, imgs, gt_semantic_segs, mask_prob=0.25):
+        """
+        随机将图像中的像素置为0。
+        :param images: 输入的图像批次，形状为 (B, C, H, W)
+        :param mask_prob: 要被置为0的像素比例
+        :return: 处理后的图像批次
+        """
+        # 生成一个随机mask，其中一些元素会被设置为False
+        random_mask = torch.rand((imgs.shape[2], imgs.shape[3])).to(imgs.device) > mask_prob  # True表示保留像素，False表示置0
+
+        imgs = imgs * random_mask.float()
+
+        gt_semantic_segs = gt_semantic_segs * random_mask + (~random_mask) * 255
+
+        return imgs, gt_semantic_segs  # 用mask乘以原图，False位置变为0
+
+    def l1_loss(self, input1, input2, lamb=0.1):
+        l1_loss = F.l1_loss(input1, input2)
+        return {'consistency_loss': l1_loss.mean()*lamb}
+
+    def kl_loss(self, pred_logits, ref_logits, lamb=0.1, temp_s=5.0, temp_t=5.0, max_v=1.0):
+        temp = temp_s - (self.iter / self.total_iter) * (temp_s - temp_t)
+        log_probs_pred = F.log_softmax(pred_logits / temp, dim=1)
+        probs_ref = F.softmax(ref_logits / temp, dim=1)
+        kl_loss = F.kl_div(log_probs_pred, probs_ref, reduction='batchmean', log_target=False).mean() * lamb * temp * temp
+        kl_loss = torch.clamp(kl_loss, min=-float('inf'), max=max_v)
+        return {'consistency_loss': kl_loss}
+    
+    def kd_kl_loss(self, student_logits, teacher_logits, mask=None, lamb=0.1, temperature=4.0, max_v=10.0):
+        assert student_logits.shape == teacher_logits.shape, \
+            f"Shape mismatch: student {student_logits.shape} vs teacher {teacher_logits.shape}"
+
+        B, C, H, W = student_logits.shape
+        student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C)
+        teacher_logits = teacher_logits.permute(0, 2, 3, 1).reshape(-1, C)
+        mask = mask.reshape(-1)
+        
+        student_logits = student_logits[mask]
+        teacher_logits = teacher_logits[mask]
+        
+        student_probs = F.log_softmax(student_logits / temperature, dim=1)
+        teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+        
+        kl_loss = F.kl_div(student_probs, teacher_probs, reduction='batchmean', log_target=False) * lamb * temperature * temperature
+        kl_loss = torch.clamp(kl_loss, min=-float('inf'), max=max_v)
+        
+        return {'kd_loss': kl_loss}
+    
+    def kd_mse_loss(self, student_logits, teacher_logits, mask=None, lamb=0.1):
+        assert student_logits.shape == teacher_logits.shape, \
+            f"Shape mismatch: student {student_logits.shape} vs teacher {teacher_logits.shape}"
+        
+        mask = mask.expand_as(student_logits)
+        student_logits = student_logits[mask]
+        teacher_logits = teacher_logits[mask]
+        
+        mse_loss = F.mse_loss(student_logits, teacher_logits)
+        return {'kd_loss': mse_loss*lamb}
+        
+    def ce_loss(self, pred_logits, ref_logits, lamb=0.1):
+        ref_target = ref_logits.argmax(dim=1)
+        ce_loss = F.cross_entropy(pred_logits, ref_target, ignore_index=255)
+        return {'consistency_loss': ce_loss.mean()*lamb}
+    
+    def mse_loss(self, input1, input2, lamb=0.1):
+        mse_loss = F.mse_loss(input1, input2)
+        return {'consistency_loss': mse_loss.mean()*lamb}
+    
+    def mse_loss_stride(self, input1, input2, lamb=0.1):
+        mse_loss = 0.0
+        for i in range(4):
+            mse_loss += F.mse_loss(input1[i], input2[i]) * lamb
+        return {'feature_consistency_loss': mse_loss.mean()}
+    
+    def dice_loss(self, input1, input2, smooth=1.0, lamb=0.1):
+        # 将 logits 转换为概率分布
+        input1 = F.softmax(input1, dim=1)
+        input2 = F.softmax(input2, dim=1)
+        # 计算交集
+        intersection = torch.sum(input1 * input2, dim=(2, 3))
+        # 计算各自的总和
+        input1_sum = torch.sum(input1, dim=(2, 3))
+        input2_sum = torch.sum(input2, dim=(2, 3))
+        # 计算 Dice 系数
+        dice = (2. * intersection + smooth) / (input1_sum + input2_sum + smooth)
+        # 计算 Dice Loss
+        dice_loss = 1 - dice
+        return {'consistency_loss': dice_loss.mean()*lamb}
+
+
+    def forward_dummy(self, img):
+        """Dummy forward function."""
+        seg_logit = self.encode_decode(img, None)
+
+        return seg_logit
+
+    def forward_style(self, img, img_metas, **kwargs):
+        return self.backbone.forward_features(img, return_style=True)
+
+    def forward(self, img=None, img_metas=None, return_loss=True, **kwargs):
+        if return_loss:
+            if self.use_kd and 'teacher_img' in kwargs and 'student_img' in kwargs:
+                return self.forward_train(**kwargs)
+            else:
+                return self.forward_train(img, img_metas, **kwargs)
+        else:
+            return self.forward_test(img, img_metas, **kwargs)
+
+    def forward_train(self,
+                      img=None,
+                      img_metas=None,
+                      gt_semantic_seg=None,
+                      seg_weight=None,
+                      return_feat=False,
+                      return_logits=False,
+                      student_img=None,
+                      student_gt=None,
+                      teacher_img=None,
+                      teacher_gt=None,
+                      ):
+        """Forward function for training.
+
+        Args:
+            img (Tensor): Input images.
+            img_metas (list[dict]): List of image info dict where each dict
+                has: 'img_shape', 'scale_factor', 'flip', and may also contain
+                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
+                For details on the values of these keys see
+                `mmseg/datasets/pipelines/formatting.py:Collect`.
+            gt_semantic_seg (Tensor): Semantic segmentation masks
+                used if the architecture supports semantic segmentation task.
+
+        Returns:
+            dict[str, Tensor]: a dictionary of loss components
+        """
+        if self.diff_train:
+            x_w_seg = self.extract_feat(img, gt_semantic_seg=gt_semantic_seg)
+            x_wo_seg = self.extract_feat(img)
+
+            losses = dict()
+            if return_feat:
+                losses['features'] = x_w_seg
+
+            loss_decode_w_seg = self._decode_head_forward_train(x_w_seg, img_metas,
+                                                        gt_semantic_seg,
+                                                        seg_weight,
+                                                        return_logits=True,
+                                                        prefix='decode_w_seg')
+            loss_decode_wo_seg = self._decode_head_forward_train(x_wo_seg, img_metas,
+                                                        gt_semantic_seg,
+                                                        seg_weight,
+                                                        return_logits=True,
+                                                        prefix='decode_wo_seg')
+            
+            logits_w_seg = loss_decode_w_seg['decode_w_seg.logits']
+            logits_wo_seg = loss_decode_wo_seg['decode_wo_seg.logits']
+
+            loss_consistency = self.mse_loss(logits_w_seg, logits_wo_seg, lamb=1.0)
+            # loss_consistency = self.kl_loss(pred_logits=logits_wo_seg, ref_logits=logits_w_seg, lamb=0.1, temp_s=1, temp_t=1, max_v=0.5)
+            
+            # if self.iter > self.total_iter // 4:
+            #     losses.update(loss_consistency)
+            losses.update(loss_consistency)
+
+            # print('jyxjyxjyx', loss_consistency['consistency_loss'], logits_w_seg.max(), logits_w_seg.min(), logits_wo_seg.max(), logits_wo_seg.min())
+
+            # for k, v in loss_decode_w_seg.items():
+            #     loss_decode_w_seg[k] = 0.5 * v
+            # for k, v in loss_decode_wo_seg.items():
+            #     loss_decode_wo_seg[k] = 0.5 * v
+            
+            losses.update(loss_decode_w_seg)
+            losses.update(loss_decode_wo_seg)
+        
+        elif self.use_kd and self.teacher_config is not None:
+            losses = dict()
+            
+            # Student forward pass
+            x = self.extract_feat(student_img, gt_semantic_seg=student_gt)
+            if return_feat:
+                losses['features'] = x
+            
+            # Gram
+            if self.kd_type == 'gram':
+                if hasattr(self.decode_head, 'forward'):
+                    student_output, student_features = self.decode_head.forward(x, kd_mode='gram')
+                loss_decode_seg = self._decode_head_forward_train(
+                    x, img_metas, student_gt,
+                    seg_weight=None,
+                    return_logits=True,
+                    prefix='decode'
+                )
+                student_logits = loss_decode_seg['decode.logits']
+
+              
+            elif self.kd_type == 'textkd':
+                # Student: feature와 logit 둘 다 받기
+                student_logits, student_features = self.decode_head.forward(
+                    x, 
+                    kd_mode='textkd'
+                )
+                loss_decode_seg = self._decode_head_forward_train(
+                    x, img_metas, student_gt,
+                    seg_weight=None,
+                    return_logits=False,
+                    prefix='decode'
+    )
+            elif self.kd_type == 'att_textkd':
+                # Student: feature와 logit 둘 다 받기
+                student_logits, student_features = self.decode_head.forward(
+                    x, 
+                    kd_mode='att_textkd'
+                )
+                loss_decode_seg = self._decode_head_forward_train(
+                    x, img_metas, student_gt,
+                    seg_weight=None,
+                    return_logits=False,
+                    prefix='decode'
+                )
+            #################################ㅋ###########여기에 att_textkd 추가 안해도 되나ㅣ?
+            else:
+                loss_decode_seg = self._decode_head_forward_train(
+                    x, img_metas, student_gt,
+                    seg_weight=None,
+                    return_logits=True,
+                    prefix='decode'
+                )
+                student_logits = loss_decode_seg['decode.logits']
+            
+            
+            with torch.no_grad():
+                if self.kd_type == 'gram':
+                    #Teacher feature 추출
+                    teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
+                    teacher_output, teacher_features = self.teacher.decode_head.forward(
+                        teacher_x, return_features=True
+                    )
+                    teacher_logits = teacher_output
+
+                elif self.kd_type == 'textkd':
+                    # Teacher decode head에서 featrue 받아오기 (256x96×96 크기)
+                    teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
+                    teacher_features = self.teacher.decode_head.forward(teacher_x, return_features=False, return_fuse=True,) #feature만 반환
+
+                
+
+                elif self.kd_type == 'att_textkd':
+                    # Teacher decode head에서 featrue 받아오기 (256x96×96 크기)
+                    teacher_x = self.teacher.extract_feat(teacher_img, gt_semantic_seg=None)
+                    teacher_logits ,teacher_features = self.teacher.decode_head.forward(teacher_x, return_features=True, return_fuse=False,) #logit,feature 반환
+                    teacher_att = torch.mean(teacher_logits, dim = 1, keepdim=True) #logit으로 att map
+                    teacher_att = torch.sigmoid(teacher_att) 
+
+                    teacher_weighted = teacher_features * teacher_att
+
+                else:
+                    teacher_logits = self.teacher.encode_decode(teacher_img, img_metas, gt_semantic_seg=None)
+                    
+
+                
+            # KD loss 계산 (type에 따라 분기)
+            if teacher_gt is not None:
+                mask = (teacher_gt != 255)
+            
+            if self.kd_type == 'kl':
+                # KL Divergence KD
+                if student_logits.shape != teacher_logits.shape:
+                    student_logits_up = F.interpolate(student_logits, size=teacher_logits.shape[-2:], mode='bilinear', align_corners=self.align_corners)
+                else:
+                    student_logits_up = student_logits
+                
+                kd_loss = self.kd_kl_loss(
+                    student_logits_up,
+                    teacher_logits,
+                    mask=mask,
+                    lamb=self.kd_lamb,
+                    temperature=self.kd_temperature,
+                    max_v=self.kd_max_v
+                )
+            elif self.kd_type == 'mse':
+                # MSE KD
+                if student_logits.shape != teacher_logits.shape:
+                    student_logits_up = F.interpolate(student_logits, size=teacher_logits.shape[-2:], mode='bilinear', align_corners=self.align_corners)
+                else:
+                    student_logits_up = student_logits
+                
+                kd_loss = self.kd_mse_loss(
+                    student_logits_up,
+                    teacher_logits,
+                    mask=mask,
+                    lamb=self.kd_lamb
+                )
+            
+            elif self.kd_type == 'gram':
+                from mmseg.models.losses.kd_loss import gram_matrix_loss
+                assert student_features.shape[1] == teacher_features.shape[1], \
+                    f"Channel mismatch for Gram Matrix KD! " \
+                    f"Student channels: {student_features.shape[1]}, " \
+                    f"Teacher channels: {teacher_features.shape[1]}. " \
+                    f"Both must have the same number of channels."
+                if student_features.shape[2:] != teacher_features.shape[2:]:
+                    student_features = F.interpolate(
+                    student_features,
+                    size=teacher_features.shape[2:],
+                    mode='bilinear',
+                    align_corners=self.align_corners
+                )
+                gram_loss = gram_matrix_loss(student_features, teacher_features)
+                kd_loss = {'kd_loss': gram_loss*self.kd_lamb}
+            
+            elif self.kd_type == 'at':
+                if student_logits.shape != teacher_logits.shape:
+                    student_logits_up = F.interpolate(student_logits, size=teacher_logits.shape[-2:], mode='bilinear', align_corners=self.align_corners)
+                else:
+                    student_logits_up = student_logits
+                at_loss = self.at_loss(student_logits_up, teacher_logits)
+                
+                kd_loss = {'kd_loss': at_loss * self.kd_lamb}   
+            
+            elif self.kd_type == 'sp':
+                if student_logits.shape != teacher_logits.shape:
+                    student_logits_up = F.interpolate(student_logits, size=teacher_logits.shape[-2:], mode='bilinear', align_corners=self.align_corners)
+                else:
+                    student_logits_up = student_logits
+                sp_loss = self.sp_loss(student_logits_up, teacher_logits)
+                kd_loss = {'kd_loss': sp_loss * self.kd_lamb}
+
+            elif self.kd_type == 'pr':
+                if student_logits.shape != teacher_logits.shape:
+                    student_logits_up = F.interpolate(student_logits, size=teacher_logits.shape[-2:], mode='bilinear', align_corners=self.align_corners)
+                else:
+                    student_logits_up = student_logits
+                pr_loss = self.pr_loss(student_logits_up, teacher_logits)
+                kd_loss = {'kd_loss': pr_loss * self.kd_lamb}
+            
+            elif self.kd_type == 'textkd':
+                if student_features.shape != teacher_features.shape:
+                    student_features_up = F.interpolate(
+                        student_features, 
+                        size=teacher_features.shape[-2:], 
+                        mode='bilinear', 
+                        align_corners=self.align_corners
+                    ) # student_features_up를 teacher_features 크기(96×96)로 upsampling
+                else:
+                    student_features_up = student_features
+
+                # Mask 준비
+                if teacher_gt is not None:
+                    mask = (teacher_gt != 255)
+                    # mask를 teacher_features 크기에 맞춰 resize
+                    if mask.dim() == 3:
+                        mask = mask.unsqueeze(1)  # (B, 1, H, W)
+                    if mask.shape[2:] != teacher_features.shape[2:]:
+                        mask = F.interpolate(
+                            mask,
+                            size=teacher_features.shape[2:],
+                            mode='nearest'
+                        ).bool()
+                else:
+                    mask = None
+
+                ### 디버깅 ###
+                if self.iter % 3000 == 0:
+                    print("\n" + "="*80)
+                    print("[TextKD Debug] Before KD Loss")
+                    print("="*80)
+                    print(f"student_features_up shape: {student_features_up.shape}")
+                    print(f"teacher_logits shape: {teacher_logits.shape}")
+                    print(f"teacher_features shape: {teacher_features.shape}")
+                    print(f"Shapes match: {student_features_up.shape == teacher_features.shape}")
+                    if mask is not None:
+                        print(f"mask shape: {mask.shape}")
+                        print(f"Valid pixels: {mask.sum().item()} / {mask.numel()}")
+                    print("="*80 + "\n")
+
+                # Text-Guided KD
+                kd_loss = self.text_kd(
+                    student_features=student_features_up,
+                    teacher_features=teacher_features,
+                    mask=mask
+                )
+
+
+            elif self.kd_type == 'att_textkd':
+                # attentive_map = student_logits student_features
+                student_att = torch.mean(student_logits , dim=1, keepdim=True)
+                student_att = torch.sigmoid(student_att)  # 0~1 사이 값으로 변환
+
+                student_weighted = student_features * student_att
+                print(student_weighted.shape)
+
+                if student_weighted.shape != teacher_features.shape:
+                    student_weighted_up = F.interpolate(
+                        student_weighted, 
+                        size=teacher_features.shape[-2:], 
+                        mode='bilinear', 
+                        align_corners=self.align_corners
+                    ) # student_weighted를 teacher_features 크기(96×96)로 upsampling
+                else:
+                    student_weighted_up = student_weighted
+
+            
+                
+                            # 4. Mask 준비
+                if teacher_gt is not None:
+                    mask = (teacher_gt != 255).float()
+                    
+                    if mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    
+                    if mask.shape[2:] != teacher_features.shape[2:]:
+                        mask = F.interpolate(
+                            mask,
+                            size=teacher_features.shape[2:],
+                            mode='nearest'
+                        ).bool()
+                else:
+                    mask = None
+
+                
+                # 5. Debug
+                if self.iter % 3000 == 0:
+                    print("\n" + "="*80)
+                    print("[AttTextKD Debug]")
+                    print("="*80)
+                    print(f"student_logits: {student_logits.shape}")
+                    print(f"student_att: {student_att.shape}")
+                    print(f"student_weighted: {student_weighted.shape}")
+                    print(f"student_weighted_up: {student_weighted_up.shape}")
+                    print(f"teacher_weighted: {teacher_weighted.shape}")
+                    print(f"Shapes match: {student_weighted_up.shape == teacher_weighted.shape}")
+                    print(f"Student attention range: [{student_att.min():.4f}, {student_att.max():.4f}]")
+                    print(f"Teacher attention range: [{teacher_att.min():.4f}, {teacher_att.max():.4f}]")
+                    if mask is not None:
+                        print(f"mask: {mask.shape}")
+                        print(f"Valid pixels: {mask.sum().item()} / {mask.numel()}")
+                    print("="*80 + "\n")
+                
+                # 6. Text-Guided KD (weighted features 전달)
+                kd_loss = self.text_kd(
+                    student_features=student_weighted_up,  # ✅ attention 적용된 feature
+                    teacher_features=teacher_weighted,      # ✅ attention 적용된 feature
+                    mask=mask
+                )
+                
+
+            else:
+                raise ValueError(f"Unknown KD type: {self.kd_type}")
+            
+            # Loss combination
+            for k, v in loss_decode_seg.items():
+                loss_decode_seg[k] = v * self.task_weight
+            losses.update(kd_loss)
+            losses.update(loss_decode_seg)
+
+        else:
+            x = self.extract_feat(img)
+            losses = dict()
+            if return_feat:
+                losses['features'] = x
+            loss_decode_seg = self._decode_head_forward_train(x, img_metas,
+                                                        gt_semantic_seg,
+                                                        seg_weight,
+                                                        return_logits)
+            losses.update(loss_decode_seg)
+        
+        self.iter = min(self.iter + 1, self.total_iter)
+
+        return losses
+
+    # TODO refactor
+    def slide_inference(self, img, img_meta, rescale):
+        """Inference by sliding-window with overlap.
+
+        If h_crop > h_img or w_crop > w_img, the small patch will be used to
+        decode without padding.
+        """
+
+        h_stride, w_stride = self.test_cfg.stride
+        h_crop, w_crop = self.test_cfg.crop_size
+        batched_slide = self.test_cfg.get('batched_slide', False)
+        batch_size, _, h_img, w_img = img.size()
+        num_classes = self.num_classes
+        h_grids = max(h_img - h_crop + h_stride - 1, 0) // h_stride + 1
+        w_grids = max(w_img - w_crop + w_stride - 1, 0) // w_stride + 1
+        preds = img.new_zeros((batch_size, num_classes, h_img, w_img))
+        count_mat = img.new_zeros((batch_size, 1, h_img, w_img))
+        if batched_slide:
+            crop_imgs, crops = [], []
+            for h_idx in range(h_grids):
+                for w_idx in range(w_grids):
+                    y1 = h_idx * h_stride
+                    x1 = w_idx * w_stride
+                    y2 = min(y1 + h_crop, h_img)
+                    x2 = min(x1 + w_crop, w_img)
+                    y1 = max(y2 - h_crop, 0)
+                    x1 = max(x2 - w_crop, 0)
+                    crop_img = img[:, :, y1:y2, x1:x2]
+                    crop_imgs.append(crop_img)
+                    crops.append((y1, y2, x1, x2))
+            crop_imgs = torch.cat(crop_imgs, dim=0)
+            crop_seg_logits = self.encode_decode(crop_imgs, img_meta)
+            for i in range(len(crops)):
+                y1, y2, x1, x2 = crops[i]
+                crop_seg_logit = \
+                    crop_seg_logits[i * batch_size:(i + 1) * batch_size]
+                preds += F.pad(crop_seg_logit,
+                               (int(x1), int(preds.shape[3] - x2), int(y1),
+                                int(preds.shape[2] - y2)))
+
+                count_mat[:, :, y1:y2, x1:x2] += 1
+        else:
+            for h_idx in range(h_grids):
+                for w_idx in range(w_grids):
+                    y1 = h_idx * h_stride
+                    x1 = w_idx * w_stride
+                    y2 = min(y1 + h_crop, h_img)
+                    x2 = min(x1 + w_crop, w_img)
+                    y1 = max(y2 - h_crop, 0)
+                    x1 = max(x2 - w_crop, 0)
+                    crop_img = img[:, :, y1:y2, x1:x2]
+                    crop_seg_logit = self.encode_decode(crop_img, img_meta)
+                    preds += F.pad(crop_seg_logit,
+                                   (int(x1), int(preds.shape[3] - x2), int(y1),
+                                    int(preds.shape[2] - y2)))
+
+                    count_mat[:, :, y1:y2, x1:x2] += 1
+        assert (count_mat == 0).sum() == 0
+        if torch.onnx.is_in_onnx_export():
+            # cast count_mat to constant while exporting to ONNX
+            count_mat = torch.from_numpy(
+                count_mat.cpu().detach().numpy()).to(device=img.device)
+        preds = preds / count_mat
+        if rescale:
+            preds = resize(
+                preds,
+                size=img_meta[0]['ori_shape'][:2],
+                mode='bilinear',
+                align_corners=self.align_corners,
+                warning=False)
+        return preds
+
+    def whole_inference(self, img, img_meta, rescale, gt_semantic_seg=None):
+        """Inference with full image."""
+
+        seg_logit = self.encode_decode(img, img_meta, gt_semantic_seg=gt_semantic_seg)
+        if rescale:
+            # support dynamic shape for onnx
+            if torch.onnx.is_in_onnx_export():
+                size = img.shape[2:]
+            else:
+                size = img_meta[0]['ori_shape'][:2]
+            seg_logit = resize(
+                seg_logit,
+                size=size,
+                mode='bilinear',
+                align_corners=self.align_corners,
+                warning=False)
+
+        return seg_logit
+
+    def inference(self, img, img_meta, rescale, gt_semantic_seg=None):
+        """Inference with slide/whole style.
+
+        Args:
+            img (Tensor): The input image of shape (N, 3, H, W).
+            img_meta (dict): Image info dict where each dict has: 'img_shape',
+                'scale_factor', 'flip', and may also contain
+                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
+                For details on the values of these keys see
+                `mmseg/datasets/pipelines/formatting.py:Collect`.
+            rescale (bool): Whether rescale back to original shape.
+
+        Returns:
+            Tensor: The output segmentation map.
+        """
+
+        assert self.test_cfg.mode in ['slide', 'whole']
+        ori_shape = img_meta[0]['ori_shape']
+        assert all(_['ori_shape'] == ori_shape for _ in img_meta)
+        if self.test_cfg.mode == 'slide':
+            seg_logit = self.slide_inference(img, img_meta, rescale)
+        else:
+            seg_logit = self.whole_inference(img, img_meta, rescale, gt_semantic_seg)
+        if hasattr(self.decode_head, 'debug_output_attention') and \
+                self.decode_head.debug_output_attention:
+            output = seg_logit
+        else:
+            output = F.softmax(seg_logit, dim=1)
+        flip = img_meta[0]['flip']
+        if flip:
+            flip_direction = img_meta[0]['flip_direction']
+            assert flip_direction in ['horizontal', 'vertical']
+            if flip_direction == 'horizontal':
+                output = output.flip(dims=(3, ))
+            elif flip_direction == 'vertical':
+                output = output.flip(dims=(2, ))
+
+        return output
+
+    def simple_test(self, img, img_meta, rescale=True):
+        """Simple test with single image."""
+        seg_logit = self.inference(img, img_meta, rescale)
+
+        ########### For logit save
+        # print('jyxjyxjyx logit save')
+        # file_name = img_meta[0]['filename'].split('/')[-1].replace('_leftImg8bit.png', '.pt')
+        # torch.save(seg_logit.cpu(), f'/home/xmuairmud/jyx/HRDA/save_attn/logit_ori/{file_name}')
+
+        if hasattr(self.decode_head, 'debug_output_attention') and \
+                self.decode_head.debug_output_attention:
+            seg_pred = seg_logit[:, 0]
+        else:
+            seg_pred = seg_logit.argmax(dim=1)
+        if torch.onnx.is_in_onnx_export():
+            # our inference backend only support 4D output
+            seg_pred = seg_pred.unsqueeze(0)
+            return seg_pred
+
+        
+        ############ For DIFT Mask
+        # print('jyxjyxjyx', seg_pred.shape)
+        # print(seg_pred)
+        # seg_pred = seg_pred[:, None, :, :]
+        # seg_logit = self.inference(img, img_meta, rescale, seg_pred)
+        # seg_pred = seg_logit.argmax(dim=1)
+        ############
+        ############ For threshold Mask
+        # threshold = 0.0
+        # prob = torch.max(seg_logit, dim=1)[0]
+        # # print('jyxjyxjyx', seg_logit.shape, seg_pred.shape)
+        # pseudo_label = torch.where(prob > threshold, seg_pred, torch.full_like(seg_pred, 255))
+        # print(f"prob: {prob.max()}")
+        # # print(f"prob: {seg_logit.max()}")
+        # print(f"psuedo_label: {(pseudo_label!=255).sum()}/{pseudo_label.shape[1]*pseudo_label.shape[2]}")
+        # # print('jyxjyxjyx', pseudo_label.shape)
+        # seg_logit = self.inference(img, img_meta, rescale, pseudo_label)
+        # seg_pred = seg_logit.argmax(dim=1)
+        ############
+
+        seg_pred = seg_pred.cpu().numpy()
+
+        ############# Visualization
+        # print('jyxjyx visualization!!!')
+        # colors = np.array([
+        #     [128, 64,128],
+        #     [244, 35,232],
+        #     [ 70, 70, 70],
+        #     [102,102,156],
+        #     [190,153,153],
+        #     [153,153,153],
+        #     [250,170, 30],
+        #     [220,220,  0],
+        #     [107,142, 35],
+        #     [152,251,152],
+        #     [ 70,130,180],
+        #     [220, 20, 60],
+        #     [255,  0,  0],
+        #     [  0,  0,142],
+        #     [  0,  0, 70],
+        #     [  0, 60,100],
+        #     [  0, 80,100],
+        #     [  0,  0,230],
+        #     [119, 11, 32],
+        # ])
+        # vis_pred = seg_pred[0, ...]
+        
+        # color_image = colors[vis_pred]
+        # color_image_pil = Image.fromarray(color_image.astype('uint8'), 'RGB')
+        # file_name = img_meta[0]['filename'].split('/')[-1].replace('_rgb_anon', '')
+        # # file_name = img_meta[0]['filename'].split('/')[-1].replace('_leftImg8bit', '')
+        # # color_image_pil.save(f'/home/xmuairmud/data/mm2024/vis/DIFF/mv/mv_{file_name}')
+        # color_image_pil.save(f'/home/xmuairmud/jyx/daily_scripts/18025_seg_wo_ref.png')
+        # # file_name = img_meta[0]['filename'].split('/')[-1].replace('_leftImg8bit', '_predict')
+        # # color_image_pil.save(f'/home/xmuairmud/jyx/HRDA/save_attn/logit_ori/{file_name}')
+        # print(type(img_meta))
+
+        # unravel batch dim
+        seg_pred = list(seg_pred)
+        return seg_pred
+
+    def aug_test(self, imgs, img_metas, rescale=True):
+        """Test with augmentations.
+
+        Only rescale=True is supported.
+        """
+        # aug_test rescale all imgs back to ori_shape for now
+        assert rescale
+        # to save memory, we get augmented seg logit inplace
+        seg_logit = self.inference(imgs[0], img_metas[0], rescale)
+        for i in range(1, len(imgs)):
+            cur_seg_logit = self.inference(imgs[i], img_metas[i], rescale)
+            seg_logit += cur_seg_logit
+        seg_logit /= len(imgs)
+        seg_pred = seg_logit.argmax(dim=1)
+        seg_pred = seg_pred.cpu().numpy()
+        # unravel batch dim
+        seg_pred = list(seg_pred)
+        return seg_pred
