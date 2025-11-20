@@ -703,7 +703,8 @@ class EncoderDecoder(BaseSegmentor):
                 # Cross Attention KD Loss
                 kd_loss = self.cross_attn_kd(
                     student_features=student_features_up,
-                    teacher_features=teacher_features
+                    teacher_features=teacher_features,
+                    return_attn_maps=(self.iter % 500 == 0)
                 )
                 
                 # 디버그 출력
@@ -714,9 +715,24 @@ class EncoderDecoder(BaseSegmentor):
                     print(f"  I2T Loss: {kd_loss['i2t_loss'].item():.4f}")
                     print(f"  T2I Loss: {kd_loss['t2i_loss'].item():.4f}")
                     print(f"  Total KD Loss: {kd_loss['kd_loss'].item():.4f}")
+                    
+                    # Attention Map 간단 통계
+                    if 'student_i2t' in kd_loss:
+                        s_i2t = kd_loss['student_i2t']
+                        t_i2t = kd_loss['teacher_i2t']
+                        print(f"  Student I2T attn: mean={s_i2t.mean():.4f}, std={s_i2t.std():.4f}")
+                        print(f"  Teacher I2T attn: mean={t_i2t.mean():.4f}, std={t_i2t.std():.4f}")
             
-            else:
-                raise ValueError(f"Unknown KD type: {self.kd_type}")
+            #     if self.iter % 500 == 0:
+            #         print(f"\n[Iter {self.iter}] Cross Attention KD:")
+            #         print(f"  Student features: {student_features_up.shape}")
+            #         print(f"  Teacher features: {teacher_features.shape}")
+            #         print(f"  I2T Loss: {kd_loss['i2t_loss'].item():.4f}")
+            #         print(f"  T2I Loss: {kd_loss['t2i_loss'].item():.4f}")
+            #         print(f"  Total KD Loss: {kd_loss['kd_loss'].item():.4f}")
+            
+            # else:
+            #     raise ValueError(f"Unknown KD type: {self.kd_type}")
             
             # ===== Loss combination =====
             for k, v in loss_decode_seg.items():

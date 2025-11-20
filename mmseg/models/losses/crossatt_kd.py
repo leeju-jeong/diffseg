@@ -1,3 +1,4 @@
+
 #crossatt_kd
 import os
 import json
@@ -22,7 +23,7 @@ class CrossAttentionKD(nn.Module):
     def __init__(self, 
                  num_classes: int = 11,
                  class_names: List[str] = None,
-                 texts_path: Optional[str] = "/home/ejeon6/leeju/diffseg/mmseg/models/losses/camvid_classes.json",
+                 texts_path: Optional[str] = "./mmseg/models/losses/camvid_classes.json",
                  feature_dim: int = 256, 
                  text_dim: int = 512, 
                  num_heads: int = 4,
@@ -139,8 +140,8 @@ class CrossAttentionKD(nn.Module):
             is_teacher: Use teacher or student layers
             
         Returns:
-            i2t_attn: (B, num_heads, H*W, num_classes)
-            t2i_attn: (B, num_heads, num_classes, H*W)
+            out_i2t: (B, num_heads, H*W, num_classes)
+            out_t2i: (B, num_heads, num_classes, H*W)
         """
         B, C, H, W = features.shape
         N = text_embeds.shape[1]  # num_classes
@@ -172,7 +173,8 @@ class CrossAttentionKD(nn.Module):
         
         attn_i2t = (Q_i2t @ K_i2t.transpose(-2, -1)) * self.scale
         attn_i2t = attn_i2t.softmax(dim=-1)  # (B, num_heads, H*W, N)
-        
+        out_i2t = attn_i2t @ V_i2t
+
         # ===== Text-to-Image Attention =====
         Q_t2i = t2i_q_layer(text_embeds)  # (B, N, text_dim)
         K_t2i = t2i_k_layer(features).flatten(2).permute(0, 2, 1)  # (B, H*W, text_dim)
@@ -184,13 +186,14 @@ class CrossAttentionKD(nn.Module):
         
         attn_t2i = (Q_t2i @ K_t2i.transpose(-2, -1)) * self.scale
         attn_t2i = attn_t2i.softmax(dim=-1)  # (B, num_heads, N, H*W)
-        print(f"[{prefix}] Output: I2T {attn_i2t.shape}, T2I {attn_t2i.shape}")
+
 
         return attn_i2t, attn_t2i
     
     def forward(self, 
                 student_features: torch.Tensor,
-                teacher_features: torch.Tensor) -> dict:
+                teacher_features: torch.Tensor,
+                return_attn_maps: bool = False) -> dict:
         """
         Compute cross attention KD loss
         
@@ -203,12 +206,17 @@ class CrossAttentionKD(nn.Module):
         Args:
             student_features: (B, feature_dim, H, W)
             teacher_features: (B, feature_dim, H, W)
+            return_attn_maps: If True, return attention maps for logging
             
         Returns:
             dict: {
                 'kd_loss': total loss,
                 'i2t_loss': image-to-text attention loss,
-                't2i_loss': text-to-image attention loss
+                't2i_loss': text-to-image attention loss,
+                'student_i2t': (optional) student i2t attention map,
+                'student_t2i': (optional) student t2i attention map,
+                'teacher_i2t': (optional) teacher i2t attention map,
+                'teacher_t2i': (optional) teacher t2i attention map
             }
         """
         B = student_features.shape[0]
@@ -238,8 +246,15 @@ class CrossAttentionKD(nn.Module):
         
         total_loss = i2t_loss + t2i_loss
         
-        return {
+        result = {
             'kd_loss': total_loss,
             'i2t_loss': i2t_loss,
             't2i_loss': t2i_loss
         }
+        if return_attn_maps:
+            result['student_i2t'] = student_i2t
+            result['student_t2i'] = student_t2i
+            result['teacher_i2t'] = teacher_i2t
+            result['teacher_t2i'] = teacher_t2i
+    
+        return result

@@ -23,6 +23,10 @@ pip install git+https://github.com/openai/CLIP.git
 # 6. 프로젝트 설치
 pip install -e .
 
+## SD 2.1
+git lfs install
+git clone https://huggingface.co/stabilityai/stable-diffusion-2-1-base
+
 # 7. 검증
 python -c "import torch, mmcv, diffusers; print('✅ Setup complete!')"
 

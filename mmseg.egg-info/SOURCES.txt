@@ -72,8 +72,10 @@ mmseg/models/decode_heads/uper_head.py
 mmseg/models/losses/__init__.py
 mmseg/models/losses/accuracy.py
 mmseg/models/losses/cross_entropy_loss.py
+mmseg/models/losses/crossatt_kd.py
 mmseg/models/losses/kd_loss.py
 mmseg/models/losses/mp.py
+mmseg/models/losses/text_kd copy.py
 mmseg/models/losses/text_kd.py
 mmseg/models/losses/utils.py
 mmseg/models/necks/__init__.py
@@ -81,6 +83,7 @@ mmseg/models/necks/segformer_adapter.py
 mmseg/models/segmentors/__init__.py
 mmseg/models/segmentors/base.py
 mmseg/models/segmentors/encoder_decoder.py
+mmseg/models/segmentors/encoder_decoder___att.py
 mmseg/models/uda/__init__.py
 mmseg/models/uda/dacs.py
 mmseg/models/uda/uda_decorator.py

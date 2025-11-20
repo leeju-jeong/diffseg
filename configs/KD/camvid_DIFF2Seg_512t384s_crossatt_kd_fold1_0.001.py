@@ -7,15 +7,15 @@ _base_ = [
 
 
 # Teacher 체크포인트 경로 
-teacher_checkpoint = '/home/ejeon6/leeju/diffseg/work_dirs/Teacher/img_only/best_mIoU_iter_29000.pth'
+teacher_checkpoint = '/root/diff/diffseg/work_dirs/Teacher/img_only/fold1_best_mIoU_iter_25000.pth'
 
 model = dict(
     # KD 파라미터 오버라이드'
     use_kd=True,        # KD
     kd_type='crossatt_kd',  # textkd
     # kd_lamb=0.001,        # KD loss weight
-    kd_lamb_i2t=0.001,
-    kd_lamb_t2i=0.001,
+    kd_lamb_i2t=0.01,
+    kd_lamb_t2i=0.01,
     # normalize_similarity=False,  # True 면 코사인유사도(정규화) False면 내적만 사용
     diff_train=False
 ) 
@@ -80,7 +80,7 @@ checkpoint_config = dict(by_epoch=False, interval=15000)
 
 
 # 작업 디렉토리
-work_dir = './work_dirs/kd/atttextkd_0.001_imgonly_pre_student/fold1'
+work_dir = './work_dirs/kd/atttextkd_0.01_imgonly_pre_student/fold1'
 
 # GPU 설정 추가
 gpu_ids = range(0, 1)
