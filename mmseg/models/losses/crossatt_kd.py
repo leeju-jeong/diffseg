@@ -85,12 +85,12 @@ class CrossAttentionKD(nn.Module):
                 text_embeddings = clip_model.encode_text(text_tokens)
                 text_embeddings = text_embeddings.float()
             
-            self.register_buffer('text_embeddings', text_embeddings)
+            self.register_buffer('text_embeddings', text_embeddings) #text embedding 고정 및 생성. # (num_classes, text_dim)
             
             del clip_model
             torch.cuda.empty_cache()
             
-            print(f"[CrossAttentionKD] Text embeddings loaded: {text_embeddings.shape}")
+            print(f"[CrossAttentionKD] Text embeddings loaded: {text_embeddings.shape}") # 11, 512
         else:
             self.text_embeddings = nn.Parameter(
                 torch.randn(num_classes, text_dim),
@@ -100,8 +100,8 @@ class CrossAttentionKD(nn.Module):
             print(f"[CrossAttentionKD] Using learnable text embeddings")
         
         # ===== Student Cross Attention Layers (KD 중 학습됨) =====
-        self.student_i2t_q = nn.Conv2d(feature_dim, text_dim, 1)
-        self.student_i2t_k = nn.Linear(text_dim, text_dim)
+        self.student_i2t_q = nn.Conv2d(feature_dim, text_dim, 1) # 1x1 conv
+        self.student_i2t_k = nn.Linear(text_dim, text_dim) # 512 -> 512 (nn.linear는 마지막 차원에 적용(11,512))
         self.student_i2t_v = nn.Linear(text_dim, text_dim)
         
         self.student_t2i_q = nn.Linear(text_dim, text_dim)
@@ -163,7 +163,7 @@ class CrossAttentionKD(nn.Module):
             t2i_v_layer = self.student_t2i_v
         
         # ===== Image-to-Text Attention =====
-        Q_i2t = i2t_q_layer(features).flatten(2).permute(0, 2, 1)  # (B, H*W, text_dim)
+        Q_i2t = i2t_q_layer(features).flatten(2).permute(0, 2, 1)  # (B,512,H*W) -> (B, H*W, text_dim)
         K_i2t = i2t_k_layer(text_embeds)  # (B, N, text_dim)
         V_i2t = i2t_v_layer(text_embeds)  # (B, N, text_dim)
         
@@ -173,7 +173,7 @@ class CrossAttentionKD(nn.Module):
         
         attn_i2t = (Q_i2t @ K_i2t.transpose(-2, -1)) * self.scale
         attn_i2t = attn_i2t.softmax(dim=-1)  # (B, num_heads, H*W, N)
-        out_i2t = attn_i2t @ V_i2t
+        
 
         # ===== Text-to-Image Attention =====
         Q_t2i = t2i_q_layer(text_embeds)  # (B, N, text_dim)

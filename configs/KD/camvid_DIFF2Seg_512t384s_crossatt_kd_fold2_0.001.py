@@ -1,13 +1,13 @@
 _base_ = [
     '../_base_/models/kd_diff_segformer_textkd.py',
-    '../_base_/datasets/kd_camvid_512x384_f1.py', 
+    '../_base_/datasets/kd_camvid_512x384_f2.py', 
     '../_base_/schedules/poly10warm.py',  
     '../_base_/default_runtime.py'
 ]
 
 
 # Teacher 체크포인트 경로 
-teacher_checkpoint = 'work_dirs/teacher/fold1_best_mIoU_iter_29000.pth'
+teacher_checkpoint = 'work_dirs/teacher/fold2_best_mIoU_iter_25000.pth'
 
 model = dict(
     # KD 파라미터 오버라이드'
@@ -80,7 +80,7 @@ checkpoint_config = dict(by_epoch=False, interval=15000)
 
 
 # 작업 디렉토리
-work_dir = './work_dirs/kd/crosskd_0.001_imgonly_pre_student/fold1'
+work_dir = './work_dirs/kd/crosskd_0.001_imgonly_pre_student/fold2'
 
 # GPU 설정 추가
 gpu_ids = range(0, 1)

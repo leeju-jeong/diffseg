@@ -83,7 +83,6 @@ mmseg/models/necks/segformer_adapter.py
 mmseg/models/segmentors/__init__.py
 mmseg/models/segmentors/base.py
 mmseg/models/segmentors/encoder_decoder.py
-mmseg/models/segmentors/encoder_decoder___att.py
 mmseg/models/uda/__init__.py
 mmseg/models/uda/dacs.py
 mmseg/models/uda/uda_decorator.py

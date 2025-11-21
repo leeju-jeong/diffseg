@@ -10,9 +10,9 @@ projection_dim: [2048, 2048, 1024, 512]
 projection_dim_x4: 256
 
 # Change for your sdv2-1 repo
-model_id: "/root/diff/diffseg/work_dirs/sd_2.1"  
+model_id: "./work_dirs/stablediffusion_2.1_base"  
 # Unet finetuned path
-unet_ckpt_pth: "/root/diff/diffseg/work_dirs/sd_2.1/unet"
+unet_ckpt_pth: "./work_dirs/stablediffusion_2.1_base/unet"
 
 # As default
 aggregation_type: "direct_aggregation"
